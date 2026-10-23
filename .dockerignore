@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+data
+node_modules
+.git
+dist
+coverage
+.DS_Store
