@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { PlutoDb } from './db.js';
 import { executeTool, toolSchemas } from './tools.js';
 import { localDateTimeForPrompt } from './time.js';
+import { clip, log } from './log.js';
 import { normalizeText } from './router.js';
 
 export type AgentInput = {
@@ -18,7 +19,12 @@ export type AgentInput = {
 
 export async function runAgent(input: AgentInput): Promise<string> {
   const quick = handlePendingAnswer(input.db, input.text);
-  if (quick) return quick;
+  if (quick) {
+    log('pending', quick);
+    return quick;
+  }
+
+  log('claude', input.model);
 
   const client = new Anthropic({ apiKey: input.apiKey });
   const messages: any[] = [{ role: 'user', content: buildUserMessage(input.db, input.text) }];
@@ -35,16 +41,21 @@ export async function runAgent(input: AgentInput): Promise<string> {
 
     messages.push({ role: 'assistant', content: response.content });
     const toolUses = response.content.filter((block: any) => block.type === 'tool_use');
-    if (toolUses.length === 0) return finalText(response.content);
+    if (toolUses.length === 0) {
+      log('claude', 'finished');
+      return finalText(response.content);
+    }
 
     const results = [];
     for (const tool of toolUses) {
+      log('tool', `${tool.name} ${clip(JSON.stringify(tool.input ?? {}))}`);
       const result = await executeTool(tool.name, tool.input ?? {}, {
         db: input.db,
         actor: input.actor,
         timezone: input.timezone,
         now: input.now,
       });
+      log('tool', `→ ${clip(result)}`);
       results.push({ type: 'tool_result', tool_use_id: tool.id, content: result });
     }
     messages.push({ role: 'user', content: results });
