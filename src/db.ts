@@ -21,6 +21,15 @@ export type Fact = { id: number; text: string; added_by: string | null; created_
 export type Reminder = { id: number; item_id: number | null; fire_at: string; text: string; sent: number };
 export type ChatLine = { id: number; sender: string; text: string; from_bot: number; at: string };
 export type PendingRemove = { type: 'remove'; ids: number[]; requestedBy: string; expiresAt: string };
+export type MessageKey = { remoteJid: string; id: string; fromMe?: boolean; participant?: string };
+export type LastAction =
+  | { kind: 'add'; itemIds: number[] }
+  | { kind: 'update'; item: Item }
+  | { kind: 'remove'; items: Item[] }
+  | { kind: 'complete'; item: Item }
+  | { kind: 'schedule'; item: Item; reminderIds: number[] }
+  | { kind: 'fact'; factId: number }
+  | { kind: 'reminder'; reminderId: number };
 
 export class PlutoDb {
   readonly db: Database.Database;
@@ -216,6 +225,94 @@ export class PlutoDb {
 
   clearPendingRemove(): void {
     this.deleteSetting('pending');
+  }
+
+  rememberPerson(name: string, jid: string): void {
+    const people = this.people();
+    people[name.trim().toLowerCase()] = jid;
+    this.setSetting('people', JSON.stringify(people));
+  }
+
+  people(): Record<string, string> {
+    const raw = this.getSetting('people');
+    return raw ? JSON.parse(raw) as Record<string, string> : {};
+  }
+
+  setExpectingUntil(iso: string): void {
+    this.setSetting('expecting_until', iso);
+  }
+
+  isExpecting(now = new Date()): boolean {
+    const raw = this.getSetting('expecting_until');
+    if (!raw) return false;
+    if (new Date(raw).getTime() <= now.getTime()) {
+      this.deleteSetting('expecting_until');
+      return false;
+    }
+    return true;
+  }
+
+  clearExpecting(): void {
+    this.deleteSetting('expecting_until');
+  }
+
+  setLastAction(action: LastAction): void {
+    this.setSetting('last_action', JSON.stringify(action));
+  }
+
+  getLastAction(): LastAction | undefined {
+    const raw = this.getSetting('last_action');
+    return raw ? JSON.parse(raw) as LastAction : undefined;
+  }
+
+  noteAdd(itemId: number): void {
+    const last = this.getLastAction();
+    if (last?.kind === 'add') this.setLastAction({ kind: 'add', itemIds: [...last.itemIds, itemId] });
+    else this.setLastAction({ kind: 'add', itemIds: [itemId] });
+  }
+
+  setPinnedKey(key: MessageKey): void {
+    this.setSetting('pinned_key', JSON.stringify(key));
+  }
+
+  getPinnedKey(): MessageKey | undefined {
+    const raw = this.getSetting('pinned_key');
+    return raw ? JSON.parse(raw) as MessageKey : undefined;
+  }
+
+  restoreItem(item: Item): void {
+    this.db.prepare('UPDATE items SET title = ?, notes = ?, location = ?, status = ?, scheduled_for = ?, added_by = ?, created_at = ?, completed_at = ? WHERE id = ?')
+      .run(item.title, item.notes, item.location, item.status, item.scheduled_for, item.added_by, item.created_at, item.completed_at, item.id);
+  }
+
+  deleteReminders(ids: number[]): void {
+    const stmt = this.db.prepare('DELETE FROM reminders WHERE id = ?');
+    ids.forEach((id) => stmt.run(id));
+  }
+
+  undoLast(): string {
+    const action = this.getLastAction();
+    if (!action) return 'nothing to undo';
+    this.deleteSetting('last_action');
+    if (action.kind === 'add') {
+      this.removeItems(action.itemIds);
+      return action.itemIds.length === 1 ? `removed #${action.itemIds[0]}` : `removed ${action.itemIds.map((id) => `#${id}`).join(', ')}`;
+    }
+    if (action.kind === 'update' || action.kind === 'complete' || action.kind === 'schedule') {
+      this.restoreItem(action.item);
+      if (action.kind === 'schedule') this.deleteReminders(action.reminderIds);
+      return `put #${action.item.id} back`;
+    }
+    if (action.kind === 'remove') {
+      action.items.forEach((item) => this.restoreItem(item));
+      return action.items.length === 1 ? `put #${action.items[0].id} back` : 'put them back';
+    }
+    if (action.kind === 'fact') {
+      this.forgetFact(action.factId);
+      return 'forgotten';
+    }
+    this.cancelReminder(action.reminderId);
+    return 'cancelled that reminder';
   }
 
   hasScheduleInNextDays(days: number, now = new Date()): boolean {

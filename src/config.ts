@@ -14,7 +14,7 @@ export type Config = {
   pairPhone?: string;
 };
 
-const DEFAULT_PREFIX = '🐧 pluto: ';
+const DEFAULT_PREFIX = '🐧 ';
 
 export function loadConfig(env = process.env): Config {
   const dataDir = path.resolve(env.DATA_DIR || './data');
