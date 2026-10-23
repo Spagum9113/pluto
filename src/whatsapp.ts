@@ -6,13 +6,14 @@ import qrcode from 'qrcode-terminal';
 import type { Config } from './config.js';
 import type { PlutoDb } from './db.js';
 import { runAgent } from './agent.js';
+import { clip, log } from './log.js';
 import { isPlutoMessage, shouldTriggerClaude, stripBotPrefix } from './router.js';
 
 export type PlutoSocket = {
   sendPluto: (text: string) => Promise<void>;
 };
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const baileysLogger = pino({ level: 'silent' });
 
 export async function startWhatsApp(config: Config, db: PlutoDb): Promise<PlutoSocket> {
   fs.mkdirSync(config.authDir, { recursive: true });
@@ -22,7 +23,7 @@ export async function startWhatsApp(config: Config, db: PlutoDb): Promise<PlutoS
   const connect = async (): Promise<any> => {
     const sock = makeWASocket({
       auth: state,
-      logger,
+      logger: baileysLogger,
       markOnlineOnConnect: false,
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,
@@ -33,20 +34,23 @@ export async function startWhatsApp(config: Config, db: PlutoDb): Promise<PlutoS
       if (pairingRequested || !config.pairPhone || state.creds.registered) return;
       pairingRequested = true;
       const code = await sock.requestPairingCode(config.pairPhone);
-      logger.warn({ pairingCode: code }, 'enter this pairing code in whatsapp linked devices');
+      log('pair', `code ${code}. WhatsApp → Linked devices → Link with phone number`);
     };
 
-    setTimeout(() => void maybeRequestPairing().catch((err) => logger.error({ err }, 'pairing code failed')), 2000);
+    setTimeout(() => void maybeRequestPairing().catch((err) => log('error', err instanceof Error ? err.message : String(err))), 2000);
 
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
-      if (qr && !config.pairPhone) qrcode.generate(qr, { small: true });
-      if (connection === 'open') logger.info('connected to whatsapp');
+      if (qr && !config.pairPhone) {
+        log('login', 'scan this QR in WhatsApp → Linked devices');
+        qrcode.generate(qr, { small: true });
+      }
+      if (connection === 'open') log('whatsapp', 'connected');
       if (connection === 'close') {
         const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        logger.warn({ statusCode, shouldReconnect }, 'whatsapp connection closed');
+        log('whatsapp', shouldReconnect ? `disconnected (${statusCode ?? 'unknown'}), reconnecting` : 'logged out. scan again to reconnect');
         if (shouldReconnect) void connect();
       }
     });
@@ -54,7 +58,7 @@ export async function startWhatsApp(config: Config, db: PlutoDb): Promise<PlutoS
     sock.ev.on('messages.upsert', async ({ messages, type }: any) => {
       if (type !== 'notify') return;
       for (const message of messages) {
-        await handleMessage(sock, config, db, message).catch((err) => logger.error({ err }, 'message handler failed'));
+        await handleMessage(sock, config, db, message).catch((err) => log('error', err instanceof Error ? err.message : String(err)));
       }
     });
 
@@ -85,13 +89,19 @@ async function handleMessage(sock: any, config: Config, db: PlutoDb, msg: any): 
   if (!bound) {
     if (isSetup && fromMe && remoteJid.endsWith('@g.us')) {
       db.bindGroup(remoteJid);
+      log('setup', 'this group is now the only chat Pluto will use');
       db.addChatLine(config.ownerName, text, false);
       await sendPluto(sock, db, remoteJid, config.botPrefix, "yo 👋 i'm pluto. i'll keep your bucket list and nag you until you actually do stuff\n\nsay \"pluto add ...\" to start, or \"pluto help\" for the rest");
+    } else if (remoteJid.endsWith('@g.us')) {
+      log('wait', 'ignoring a group until you send !setup from your phone');
     }
     return;
   }
 
-  if (remoteJid !== bound) return;
+  if (remoteJid !== bound) {
+    log('skip', 'message outside the bound group');
+    return;
+  }
 
   const quotedId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
   const quotedBot = db.isSentByPluto(quotedId);
@@ -100,15 +110,21 @@ async function handleMessage(sock: any, config: Config, db: PlutoDb, msg: any): 
   db.addChatLine(sender, stripBotPrefix(text, config.botPrefix), fromBot);
 
   if (fromBot) return;
+
+  log('chat', `${sender}: ${clip(stripBotPrefix(text, config.botPrefix))}`);
   if (isSetup && fromMe) {
+    log('setup', 'already bound to this group');
     await sendPluto(sock, db, remoteJid, config.botPrefix, "i'm already on in here");
     return;
   }
 
   const pending = db.getPendingRemove();
-  if (!shouldTriggerClaude({ text, botNames: config.botNames, quotedBot, pending })) return;
+  if (!shouldTriggerClaude({ text, botNames: config.botNames, quotedBot, pending })) {
+    log('skip', 'saved for context, no reply');
+    return;
+  }
 
-  logger.info({ trigger: true, sender, fromMe }, 'triggering pluto');
+  log('reply', `${sender} triggered Pluto${quotedBot ? ' by quoting' : ''}`);
   await sock.sendPresenceUpdate('composing', remoteJid);
   await delay(900);
   const reply = await runAgent({
@@ -132,7 +148,7 @@ async function sendPluto(sock: any, db: PlutoDb, jid: string, prefix: string, te
     const id = sent?.key?.id;
     if (id) db.addSentId(id);
     db.addChatLine('pluto', bubble, true);
-    logger.info({ sent: true }, 'sent pluto message');
+    log('send', clip(bubble));
   }
 }
 

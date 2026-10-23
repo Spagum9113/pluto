@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { config } from './config.js';
 import { PlutoDb } from './db.js';
+import { log } from './log.js';
 import { startScheduler } from './scheduler.js';
 import { startWhatsApp } from './whatsapp.js';
 
@@ -14,4 +15,5 @@ const db = new PlutoDb(config.dbPath);
 const wa = await startWhatsApp(config, db);
 startScheduler(db, wa.sendPluto, config.timezone);
 
-console.log('pluto is running');
+const group = db.getGroupJid();
+log('ready', group ? `listening in the bound group` : 'waiting for !setup in the group');

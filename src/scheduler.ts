@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import type { PlutoDb } from './db.js';
+import { clip, log } from './log.js';
 import { formatLocal, isMoreThanOneHourLate, isoWeekKey, localParts } from './time.js';
 
 export type SendFn = (text: string) => Promise<void>;
@@ -15,7 +16,11 @@ export function dueReminderTexts(db: PlutoDb, now = new Date()): { id: number; t
 export async function sendDueReminders(db: PlutoDb, send: SendFn, now = new Date()): Promise<void> {
   for (const reminder of db.dueReminders(now.toISOString())) {
     db.markReminderSent(reminder.id);
-    if (isMoreThanOneHourLate(reminder.fire_at, now)) continue;
+    if (isMoreThanOneHourLate(reminder.fire_at, now)) {
+      log('reminder', `skipped #${reminder.id}, more than an hour late`);
+      continue;
+    }
+    log('reminder', `sending #${reminder.id}: ${clip(reminder.text)}`);
     await send(reminder.text);
   }
 }
@@ -40,7 +45,10 @@ export function buildWeeklyNudge(db: PlutoDb, now = new Date(), timezone = 'Aust
 
 export async function sendWeeklyNudge(db: PlutoDb, send: SendFn, now = new Date(), timezone = 'Australia/Melbourne'): Promise<void> {
   const text = buildWeeklyNudge(db, now, timezone);
-  if (text) await send(text);
+  if (text) {
+    log('nudge', clip(text));
+    await send(text);
+  }
 }
 
 export function startScheduler(db: PlutoDb, send: SendFn, timezone: string): void {
