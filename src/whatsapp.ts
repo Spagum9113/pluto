@@ -7,7 +7,7 @@ import type { Config } from './config.js';
 import type { MessageKey, PlutoDb } from './db.js';
 import { runAgent, type AgentReply } from './agent.js';
 import { clip, log } from './log.js';
-import { isPlutoMessage, mentionsBot, shouldTriggerClaude, stripBotPrefix, typingDelayMs } from './router.js';
+import { helpText, isHelpRequest, isPlutoMessage, mentionsBot, shouldTriggerClaude, stripBotPrefix, typingDelayMs } from './router.js';
 
 export type PlutoSocket = {
   sendPluto: (text: string) => Promise<void>;
@@ -124,6 +124,13 @@ async function handleMessage(sock: any, config: Config, db: PlutoDb, msg: any): 
     return;
   }
   if (expecting && !named && !quotedBot) db.clearExpecting();
+
+  if (isHelpRequest(text, config.botNames, quotedBot)) {
+    db.clearExpecting();
+    log('reply', `${sender} asked for help`);
+    await deliverText(sock, db, remoteJid, config.botPrefix, helpText());
+    return;
+  }
 
   log('reply', `${sender} triggered Pluto${quotedBot ? ' by quoting' : expecting && !named ? ' with an answer' : ''}`);
   const reply = await runAgent({

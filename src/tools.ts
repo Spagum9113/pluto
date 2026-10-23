@@ -77,7 +77,10 @@ export const toolSchemas: Tool[] = [
 export function executeTool(name: string, input: any, ctx: ToolContext): ToolResult {
   switch (name) {
     case 'add_item': {
-      const item = ctx.db.addItem({ title: input.title, notes: input.notes, location: input.location, addedBy: ctx.actor });
+      const title = String(input.title ?? '').trim();
+      const existing = ctx.db.listItems('open').find((item) => item.title.trim().toLowerCase() === title.toLowerCase());
+      if (existing) return { text: `already #${existing.id} ${label(existing)}` };
+      const item = ctx.db.addItem({ title, notes: input.notes, location: input.location, addedBy: ctx.actor });
       ctx.db.noteAdd(item.id);
       return { text: `added #${item.id} ${label(item)}`, react: '👍' };
     }

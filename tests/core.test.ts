@@ -4,9 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { PlutoDb } from '../src/db.js';
-import { isPlutoMessage, shouldTriggerClaude, typingDelayMs } from '../src/router.js';
+import { helpText, isHelpRequest, isPlutoMessage, shouldTriggerClaude, typingDelayMs } from '../src/router.js';
 import { buildWeeklyNudge, dueReminderTexts } from '../src/scheduler.js';
-import { addScheduleReminders } from '../src/tools.js';
+import { addScheduleReminders, executeTool } from '../src/tools.js';
 import { localDateTimeToUtcIso } from '../src/time.js';
 
 const TZ = 'Australia/Melbourne';
@@ -35,6 +35,38 @@ test('own-number detection treats sent ids and prefix as Pluto, while Ethan is s
   assert.equal(isPlutoMessage({ fromMe: true, id: 'other', text: '🐧 hello' }, sentIds, '🐧 '), true);
   assert.equal(isPlutoMessage({ fromMe: true, id: 'ethan-id', text: 'pluto list' }, sentIds, '🐧 '), false);
   assert.equal(isPlutoMessage({ fromMe: false, id: 'pluto-id', text: '🐧 echo' }, sentIds, '🐧 '), false);
+});
+
+test('pluto help is a fixed list, and other help lines are not', () => {
+  assert.equal(isHelpRequest('pluto help', ['pluto']), true);
+  assert.equal(isHelpRequest('yo pluto help', ['pluto']), true);
+  assert.equal(isHelpRequest('pluto help?', ['pluto']), true);
+  assert.equal(isHelpRequest('pluto help me pick', ['pluto']), false);
+  assert.equal(isHelpRequest('help', ['pluto']), false);
+  assert.equal(isHelpRequest('help', ['pluto'], true), true);
+  assert.equal(isHelpRequest('the balloon', ['pluto'], true), false);
+  const text = helpText();
+  assert.match(text, /^WHAT I CAN DO\n\n1\. 📋 LIST — open or done/);
+  assert.match(text, /6\. ↩️ UNDO — say nvm/);
+  assert.match(text, /polls, 7-day pins, and a thursday nudge happen on their own/);
+  assert.match(text, /SAY PLUTO, or quote me$/);
+  assert.equal(text.includes('🐧'), false);
+});
+
+test('an open item with the same title is not added again', () => {
+  const db = tempDb();
+  const first = db.addItem({ title: 'Hot Air Balloon', location: 'yarra valley' });
+  const again = executeTool('add_item', { title: '  hot air balloon  ', location: 'somewhere else' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(again.text, 'already #1 Hot Air Balloon, yarra valley');
+  assert.equal(again.react, undefined);
+  assert.equal(db.listItems('open').length, 1);
+  db.completeItem(first.id);
+  const redo = executeTool('add_item', { title: 'hot air balloon' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(redo.text, 'added #2 hot air balloon');
+  assert.equal(db.listItems('open').length, 1);
+  db.removeItems([2]);
+  const afterRemove = executeTool('add_item', { title: 'hot air balloon' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(afterRemove.text, 'added #3 hot air balloon');
 });
 
 test('melbourne local time converts to the expected UTC instant', () => {
