@@ -4,10 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { PlutoDb } from '../src/db.js';
-import { handlePendingAnswer } from '../src/agent.js';
-import { isPlutoMessage, shouldTriggerClaude } from '../src/router.js';
+import { helpText, isHelpRequest, isPlutoMessage, shouldTriggerClaude, typingDelayMs } from '../src/router.js';
 import { buildWeeklyNudge, dueReminderTexts } from '../src/scheduler.js';
-import { addScheduleReminders } from '../src/tools.js';
+import { addScheduleReminders, executeTool } from '../src/tools.js';
 import { localDateTimeToUtcIso } from '../src/time.js';
 
 const TZ = 'Australia/Melbourne';
@@ -17,21 +16,57 @@ function tempDb(): PlutoDb {
   return new PlutoDb(path.join(dir, 'bucket.db'));
 }
 
-test('trigger heuristic responds to names, actions, quotes, and pending yes/no', () => {
+test('trigger answers to pluto, quotes, and an open question only', () => {
   assert.equal(shouldTriggerClaude({ text: 'u free sat?', botNames: ['pluto'], quotedBot: false }), false);
-  assert.equal(shouldTriggerClaude({ text: 'pluto list', botNames: ['pluto'], quotedBot: false }), true);
-  assert.equal(shouldTriggerClaude({ text: "what's left", botNames: ['pluto'], quotedBot: false }), true);
-  assert.equal(shouldTriggerClaude({ text: 'random reply', botNames: ['pluto'], quotedBot: true }), true);
-  assert.equal(shouldTriggerClaude({ text: 'yes', botNames: ['pluto'], quotedBot: false }), false);
-  assert.equal(shouldTriggerClaude({ text: 'yes', botNames: ['pluto'], quotedBot: false, pending: { type: 'remove', ids: [1], requestedBy: 'jay', expiresAt: new Date(Date.now() + 60000).toISOString() } }), true);
+  assert.equal(shouldTriggerClaude({ text: 'add skydiving', botNames: ['pluto'], quotedBot: false }), false);
+  assert.equal(shouldTriggerClaude({ text: "what's left", botNames: ['pluto'], quotedBot: false }), false);
+  assert.equal(shouldTriggerClaude({ text: 'yo pluto add the balloon', botNames: ['pluto'], quotedBot: false }), true);
+  assert.equal(shouldTriggerClaude({ text: 'the balloon one', botNames: ['pluto'], quotedBot: true }), true);
+  assert.equal(shouldTriggerClaude({ text: 'the balloon one', botNames: ['pluto'], quotedBot: false, expecting: true }), true);
+  assert.equal(shouldTriggerClaude({ text: 'yeah after 2', botNames: ['pluto'], quotedBot: false, quotedSomeoneElse: true, expecting: true }), false);
+  assert.equal(shouldTriggerClaude({ text: 'pluto add it', botNames: ['pluto'], quotedBot: false, quotedSomeoneElse: true }), true);
+  assert.equal(typingDelayMs('hi'), 2500);
+  assert.equal(typingDelayMs('x'.repeat(200)), 4000);
 });
 
 test('own-number detection treats sent ids and prefix as Pluto, while Ethan is still a user', () => {
   const sentIds = { has: (id?: string | null) => id === 'pluto-id' };
-  assert.equal(isPlutoMessage({ fromMe: true, id: 'pluto-id', text: 'anything' }, sentIds, '🐧 pluto: '), true);
-  assert.equal(isPlutoMessage({ fromMe: true, id: 'other', text: '🐧 pluto: hello' }, sentIds, '🐧 pluto: '), true);
-  assert.equal(isPlutoMessage({ fromMe: true, id: 'ethan-id', text: 'pluto list' }, sentIds, '🐧 pluto: '), false);
-  assert.equal(isPlutoMessage({ fromMe: false, id: 'pluto-id', text: '🐧 pluto: echo' }, sentIds, '🐧 pluto: '), false);
+  assert.equal(isPlutoMessage({ fromMe: true, id: 'pluto-id', text: 'anything' }, sentIds, '🐧 '), true);
+  assert.equal(isPlutoMessage({ fromMe: true, id: 'other', text: '🐧 hello' }, sentIds, '🐧 '), true);
+  assert.equal(isPlutoMessage({ fromMe: true, id: 'ethan-id', text: 'pluto list' }, sentIds, '🐧 '), false);
+  assert.equal(isPlutoMessage({ fromMe: false, id: 'pluto-id', text: '🐧 echo' }, sentIds, '🐧 '), false);
+});
+
+test('pluto help is a fixed list, and other help lines are not', () => {
+  assert.equal(isHelpRequest('pluto help', ['pluto']), true);
+  assert.equal(isHelpRequest('yo pluto help', ['pluto']), true);
+  assert.equal(isHelpRequest('pluto help?', ['pluto']), true);
+  assert.equal(isHelpRequest('pluto help me pick', ['pluto']), false);
+  assert.equal(isHelpRequest('help', ['pluto']), false);
+  assert.equal(isHelpRequest('help', ['pluto'], true), true);
+  assert.equal(isHelpRequest('the balloon', ['pluto'], true), false);
+  const text = helpText();
+  assert.match(text, /^WHAT I CAN DO\n\n1\. 📋 LIST — open or done/);
+  assert.match(text, /6\. ↩️ UNDO — say nvm/);
+  assert.match(text, /polls, 7-day pins, and a thursday nudge happen on their own/);
+  assert.match(text, /SAY PLUTO, or quote me$/);
+  assert.equal(text.includes('🐧'), false);
+});
+
+test('an open item with the same title is not added again', () => {
+  const db = tempDb();
+  const first = db.addItem({ title: 'Hot Air Balloon', location: 'yarra valley' });
+  const again = executeTool('add_item', { title: '  hot air balloon  ', location: 'somewhere else' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(again.text, 'already #1 Hot Air Balloon, yarra valley');
+  assert.equal(again.react, undefined);
+  assert.equal(db.listItems('open').length, 1);
+  db.completeItem(first.id);
+  const redo = executeTool('add_item', { title: 'hot air balloon' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(redo.text, 'added #2 hot air balloon');
+  assert.equal(db.listItems('open').length, 1);
+  db.removeItems([2]);
+  const afterRemove = executeTool('add_item', { title: 'hot air balloon' }, { db, actor: 'ethan', timezone: TZ });
+  assert.equal(afterRemove.text, 'added #3 hot air balloon');
 });
 
 test('melbourne local time converts to the expected UTC instant', () => {
@@ -69,13 +104,15 @@ test('weekly nudge picks two oldest open items when next seven days are empty', 
   assert.equal(buildWeeklyNudge(db, new Date('2026-10-22T08:03:00.000Z'), TZ), undefined);
 });
 
-test('soft remove waits for yes and persists through settings', () => {
+test('undo puts the last add back and an open question expires', () => {
   const db = tempDb();
   const item = db.addItem({ title: 'skydive' });
-  db.setPendingRemove({ type: 'remove', ids: [item.id], requestedBy: 'ethan', expiresAt: new Date(Date.now() + 60000).toISOString() });
-  assert.equal(handlePendingAnswer(db, 'no'), 'cool, keeping it');
-  assert.equal(db.getItem(item.id)?.status, 'open');
-  db.setPendingRemove({ type: 'remove', ids: [item.id], requestedBy: 'ethan', expiresAt: new Date(Date.now() + 60000).toISOString() });
-  assert.equal(handlePendingAnswer(db, 'yes'), 'gone');
+  db.noteAdd(item.id);
+  assert.equal(db.undoLast(), 'removed #1');
   assert.equal(db.getItem(item.id)?.status, 'removed');
+  assert.equal(db.isExpecting(new Date()), false);
+  db.setExpectingUntil(new Date(Date.now() + 60_000).toISOString());
+  assert.equal(db.isExpecting(new Date()), true);
+  db.setExpectingUntil(new Date(Date.now() - 1000).toISOString());
+  assert.equal(db.isExpecting(new Date()), false);
 });
